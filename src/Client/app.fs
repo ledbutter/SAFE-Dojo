@@ -18,7 +18,8 @@ open Shared
 /// The different elements of the completed report.
 type Report =
     { Location : LocationResponse
-      Crimes : CrimeResponse array }
+      Crimes : CrimeResponse array
+      Weather : WeatherResponse }
 
 type ServerState = Idle | Loading | ServerError of string
 
@@ -35,25 +36,38 @@ type Msg =
     | PostcodeChanged of string
     | GotReport of Report
     | ErrorMsg of exn
+    | Clear
 
 /// The init function is called to start the message pump with an initial view.
 let init () = 
-    { Postcode = null
+    { Postcode = ""
       Report = None
       ValidationError = None
       ServerState = Idle }, Cmd.ofMsg (PostcodeChanged "")
 
 let decoderForLocationResponse = Thoth.Json.Decode.Auto.generateDecoder<LocationResponse> ()
 let decoderForCrimeResponse = Thoth.Json.Decode.Auto.generateDecoder<CrimeResponse array>()
+let decoderForWeatherResponse = Thoth.Json.Decode.Auto.generateDecoder<WeatherResponse> ()
+
+let inline getJson<'T> (response:Fetch.Fetch_types.Response) = response.text() |> Promise.map Thoth.Json.Decode.Auto.unsafeFromString<'T>
 
 let getResponse postcode = promise {
     let! location = Fetch.fetchAs<LocationResponse> (sprintf "/api/distance/%s" postcode) decoderForLocationResponse []
     let! crimes = Fetch.tryFetchAs (sprintf "api/crime/%s" postcode) decoderForCrimeResponse [] |> Promise.map (Result.defaultValue [||])
-    
-    (* Task 4.5 WEATHER: Fetch the weather from the API endpoint you created.
-       Then, save its value into the Report below. You'll need to add a new
-       field to the Report type first, though! *)
-    return { Location = location; Crimes = crimes } }
+    // let! weather = Fetch.fetchAs<WeatherResponse> (sprintf "/api/weather/%s" postcode) decoderForWeatherResponse []
+
+    let postcodeRequest = {Postcode = postcode}
+
+    // let! locationResponse = Fetch.postRecord (sprintf "/api/distance") postcodeRequest []
+    // let! location = getJson<LocationResponse> locationResponse
+
+    // let! crimesResponse = Fetch.postRecord (sprintf "/api/crime") postcodeRequest []
+    // let! crimes = getJson<CrimeResponse array> crimesResponse
+
+    let! weatherResponse = Fetch.postRecord (sprintf "/api/weather") postcodeRequest []
+    let! weather = getJson<WeatherResponse> weatherResponse
+
+    return { Location = location; Crimes = crimes; Weather = weather } }
  
 /// The update function knows how to update the model given a message.
 let update msg model =
@@ -69,10 +83,9 @@ let update msg model =
     | _, PostcodeChanged p ->
         { model with
             Postcode = p
-            (* Task 2.2 Validation. Use the Validation.validatePostcode function to implement client-side form validation.
-               Note that the validation is the same shared code that runs on the server! *)
-            ValidationError = None }, Cmd.none
+            ValidationError = if Validation.validatePostcode p then None else Some("Invalid Postal Code!")}, Cmd.none
     | _, ErrorMsg e -> { model with ServerState = ServerError e.Message }, Cmd.none
+    | _, Clear -> init()
 
 [<AutoOpen>]
 module ViewParts =
@@ -107,12 +120,14 @@ module ViewParts =
         basicTile "Map" [ Tile.Size Tile.Is12 ] [
             iframe [
                 Style [ Height 410; Width 810 ]
-                (* Task 3.1 MAPS: Use the getBingMapUrl function to build a valid maps URL using the supplied LatLong.
-                   You can use it to add a Src attribute to this iframe. *)
+                Src (getBingMapUrl latLong)
             ] [ ]
         ]
 
     let weatherTile weatherReport =
+        let formatTemp() = 
+            (sprintf "%.1f\u00b0C" weatherReport.AverageTemperature)
+
         childTile "Weather" [
             Level.level [ ] [
                 Level.item [ Level.Item.HasTextCentered ] [
@@ -124,21 +139,19 @@ module ViewParts =
                         ]
                         Level.title [ ] [
                             Heading.h3 [ Heading.Is4; Heading.Props [ Style [ Width "100%" ] ] ] [
-                                (* Task 4.8 WEATHER: Get the temperature from the given weather report
-                                   and display it here instead of an empty string. *)
-                                str ""
+                                str (formatTemp())
                             ]
                         ]
                     ]
                 ]
             ]
         ]
-    let locationTile model =
+    let locationTile (location:LocationResponse) =
         childTile "Location" [
             div [ ] [
-                Heading.h3 [ ] [ str model.Location.Location.Town ]
-                Heading.h4 [ ] [ str model.Location.Location.Region ]
-                Heading.h4 [ ] [ sprintf "%.1fKM to London" model.Location.DistanceToLondon |> str ]
+                Heading.h3 [ ] [ str location.Location.Town ]
+                Heading.h4 [ ] [ str location.Location.Region ]
+                Heading.h4 [ ] [ sprintf "%.1fKM to London" location.DistanceToLondon |> str ]
             ]
         ]
              
@@ -184,8 +197,15 @@ let view model dispatch =
                                       Button.OnClick (fun _ -> dispatch GetReport)
                                       Button.Disabled (model.ValidationError.IsSome)
                                       Button.IsLoading (model.ServerState = ServerState.Loading) ]
-                                    [ str "Submit" ] ] ] ]
-
+                                    [ str "Submit" ] ] ]
+                        Level.right [] [
+                            Level.item [] [
+                                Button.button
+                                    [ Button.IsFullWidth
+                                      Button.Color IsDark
+                                      Button.OnClick (fun _ -> dispatch Clear)
+                                      Button.Disabled (model.Postcode.Length = 0) ]
+                                    [ str "Clear"] ] ] ]
                 ]
 
             match model with
@@ -209,10 +229,8 @@ let view model dispatch =
                 yield
                     Tile.ancestor [ ] [
                         Tile.parent [ Tile.IsVertical; Tile.Size Tile.Is4 ] [ 
-                            locationTile model
-                            (* Task 4.6 WEATHER: Generate the view code for the weather tile
-                               using the weatherTile function, supplying the weather report
-                               from the model, and include it here as part of the list *)
+                            locationTile model.Location
+                            weatherTile model.Weather
                         ]
                         Tile.parent [ Tile.Size Tile.Is8 ] [
                             crimeTile model.Crimes
